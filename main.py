@@ -15,17 +15,31 @@ SERVE_ALLOCATION_WARNING = "Warning: The proposed buy orders are insufficient to
 WARN_DIVERGENCE_THRESHOLD = float(os.getenv("WARN_DIVERGENCE_THRESHOLD", 4.9e-5)) # default: warn when a 50/50 allocation shifts to 50/51 even after rebalancing
 SERVE_DIVERGENCE_THRESHOLD = float(os.getenv("SERVE_DIVERGENCE_THRESHOLD", 1.13e-3)) # default: warn when a 50/50 allocation shifts to 50/55 even after rebalancing
 
-async def main() -> None:
+def get_positions(compact_portfolio_response):
+    categories = compact_portfolio_response.get('categories', [])
+    for category in categories:
+        if category.get('categoryType') == 'stocksAndETFs':
+            return category.get('positions', [])
+    raise ValueError("No 'stocksAndETFs' category found in portfolio response")
+
+async def main(api: TradeRepublicApi) -> None:
     target_allocation = get_target_allocation()
 
+    print("Should rebalance towards the following target allocation:")
+    print(json.dumps(target_allocation, indent=2))
+    continue_execution = ask_for_confirmation("Do you want to continue with this target allocation?")
+    if not continue_execution:
+        print("Execution cancelled by user.")
+        return
+
+
     # Initialize the API client
-    api: TradeRepublicApi = login(store_credentials=True)
     api_wrapper = ApiWrapper(api)
 
     try:
         print("Fetching portfolio...")
         portfolio = await api_wrapper.request(api.compact_portfolio())
-        positions = portfolio['positions']
+        positions = get_positions(portfolio)
         
         print("Collecting asset and ticker data...")
         data_tasks = list(map(lambda pos: collect_instrument_data(pos, api, api_wrapper), positions))
@@ -234,7 +248,7 @@ async def get_savings_plans_by_instrument(api_wrapper, api):
     return plans_by_instrument
 
 async def collect_instrument_data(position, api, api_wrapper):
-    instrument_id = position['instrumentId']
+    instrument_id = position['isin']
     details = await fetch_instrument_details(api, api_wrapper, instrument_id)
     price_info = await estimate_price_from_ticker(api, api_wrapper, instrument_id, details['exchange'])
     net_worth = float(position['netSize']) * price_info['estimated_price']
@@ -274,18 +288,19 @@ async def fetch_instrument_details(api, api_wrapper, instrument_id):
         'currency': details.get('notionalCurrency'),
     }
 
-async def estimate_price_from_ticker(api, api_wrapper, instrument_id, exchange):
-    search_results = await api_wrapper.request(api.ticker(instrument_id, exchange))
+async def estimate_price_from_ticker(api, api_wrapper, instrument_id):
+    search_results = await api_wrapper.request(api.ticker(instrument_id))
     ask = search_results.get('ask', {}).get('price')
     bid = search_results.get('bid', {}).get('price')
     if ask is None and bid is None:
-        raise ValueError(f"No ask or bid price available for instrument {instrument_id} at exchange {exchange}")
+        raise ValueError(f"No ask or bid price available for instrument {instrument_id}")
     if ask is None:
         ask = bid
     if bid is None:
         bid = ask
-    return { 'estimated_price': (float(ask) + float(bid)) / 2, 'instrument_id': instrument_id, 'exchange': exchange }
+    return { 'estimated_price': (float(ask) + float(bid)) / 2, 'instrument_id': instrument_id }
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    api: TradeRepublicApi = login(store_credentials=True)
+    asyncio.run(main(api))
